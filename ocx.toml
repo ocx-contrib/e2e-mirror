@@ -2,3 +2,4 @@
 [tools]
 cli = "dev.ocx.sh/ocx/cli:0.7.0-dev_20260903181659"
 mirror = "dev.ocx.sh/ocx/mirror:0.7.0-dev_20260903094738"
+uv = "ocx.sh/astral-sh/uv:0"
