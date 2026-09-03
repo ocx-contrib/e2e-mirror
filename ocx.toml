@@ -1,0 +1,4 @@
+#:schema https://ocx.sh/schemas/project/v1.json
+[tools]
+cli = "ocx.sh/ocx/cli:0.6.0"
+mirror = "dev.ocx.sh/ocx/mirror:0.7.0-dev_20260903094738"

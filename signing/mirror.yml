@@ -1,0 +1,59 @@
+# Mirror spec: the signing canary.
+#
+# This repository exists to prove one thing end to end that no offline
+# harness can: that a `sign:` block renders into a real GitHub Actions
+# workflow, signs keyless against Fulcio using the workflow's own OIDC
+# identity, publishes to dev.ocx.sh, and that `ocx package verify` then
+# accepts the result against that identity.
+#
+# pycowsay is the payload for the same reason mirror-pypi uses it: pure
+# python, tiny, and it publishes several platform manifests under one
+# index. The index is the subject the signing sweep exists for -- a
+# referrer is filed against the subject digest, so a canary with a single
+# manifest would not exercise the leg that was broken twice during
+# development.
+name: e2e-signing
+target:
+  registry: dev.ocx.sh
+  repository: ocx/e2e-signing
+
+source:
+  type: pypi
+  package: pycowsay
+
+python:
+  version: "3.14.6"
+  abi: cp314
+  interpreter_package: "ghcr.io/ocx-contrib/astral-sh/python-build-standalone:slim-3.14.6"
+  lock:
+    universal: true
+
+wheels:
+  "linux/amd64+libc.glibc": ~
+  "linux/amd64+libc.musl": ~
+  darwin/arm64: ~
+  windows/amd64: ~
+
+# The point of the repository. `keyless: {}` would take the public Sigstore
+# instances; both endpoints are named explicitly so the canary fails loudly
+# if the renderer ever stops emitting them, rather than quietly signing
+# against a default.
+sign:
+  keyless:
+    fulcio: https://fulcio.sigstore.dev
+    rekor: https://rekor.sigstore.dev
+
+tests:
+  - name: smoke
+    script: signing/tests/smoke.star
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+  darwin/arm64:
+    runner: macos-latest
+  windows/amd64:
+    runner: windows-latest
+
+cascade: true
+build_timestamp: date
