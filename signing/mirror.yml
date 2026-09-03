@@ -28,13 +28,13 @@ python:
   lock:
     universal: true
 
-# One entry per platform, no libc split. mirror-pypi splits linux by libc
-# and pairs each key with a container leg that declares its own libc; a bare
-# native leg carries no `+libc.` suffix and so resolves neither bundle. The
-# canary needs several platform manifests under one index -- that is what the
-# signing sweep is about -- not a libc matrix.
+# The libc split is not optional here: the interpreter package publishes
+# linux/amd64+libc.glibc and +libc.musl and no bare linux/amd64, so each key
+# must be paired with a container leg that declares its own libc. Dropping the
+# split fails prepare with "no entry compatible with platform 'linux/amd64'".
 wheels:
-  linux/amd64: ~
+  "linux/amd64+libc.glibc": ~
+  "linux/amd64+libc.musl": ~
   darwin/arm64: ~
   windows/amd64: ~
 
@@ -54,6 +54,12 @@ tests:
 platforms:
   linux/amd64:
     runner: ubuntu-latest
+    # alpine = musl, ubuntu = glibc. The test step derives the `+libc.` suffix
+    # from the container's own libc, which is what lets each leg resolve its
+    # matching bundle; a bare native leg carries no suffix and resolves none.
+    containers:
+      - image: alpine:3.20
+      - image: ubuntu:24.04
   darwin/arm64:
     runner: macos-latest
   windows/amd64:

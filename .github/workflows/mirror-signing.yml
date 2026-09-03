@@ -133,7 +133,22 @@ jobs:
           - platform: linux/amd64
             platform_slug: linux_amd64
             runner: ubuntu-latest
-            container_id: _native_
+            container_id: alpine_3_20
+            container_image: "alpine:3.20"
+            container_libc: "musl"
+            docker_platform: "linux/amd64"
+            shell: sh
+            tests:
+              - name: smoke
+                kind: script
+                script: signing/tests/smoke.star
+          - platform: linux/amd64
+            platform_slug: linux_amd64
+            runner: ubuntu-latest
+            container_id: ubuntu_24_04
+            container_image: "ubuntu:24.04"
+            container_libc: "gnu"
+            docker_platform: "linux/amd64"
             shell: bash
             tests:
               - name: smoke
@@ -217,6 +232,86 @@ jobs:
             for rel in $(printf '%s' "${ENV_JSON}" | jq -r '.layers[].path // empty' 2>/dev/null | tr -d '\r' || true); do
               LAYERS="${LAYERS} ${VERSION_DIR}/${rel}"
             done
+            # Container legs: fetch a libc-matched static ocx once, then run every
+            # `ocx package test` inside `docker run <image>` so the mirrored
+            # artifact is executed by that image's loader. Native legs (empty
+            # container_image, e.g. the macOS/Windows legs of a mixed spec) call
+            # the runner's own ocx unchanged.
+            CONTAINER_IMAGE="${{ matrix.container_image }}"
+            if [ -n "${CONTAINER_IMAGE}" ]; then
+              # `docker_platform` is `platform` minus any `os.features` suffix:
+              # docker rejects `linux/amd64+libc.musl` outright, while the matrix
+              # label, the `ocx package test --platform` flag and the discover
+              # platform set all need the full, unambiguous key.
+              case "${{ matrix.docker_platform }}" in
+                linux/amd64) OCX_ARCH=x86_64 ;;
+                linux/arm64) OCX_ARCH=aarch64 ;;
+                *) echo "::error::no static ocx release for container platform ${{ matrix.docker_platform }} (linux/amd64 and linux/arm64 only)"; exit 1 ;;
+              esac
+              # Container legs run the artifact natively — no qemu is installed,
+              # so a leg whose runner is a different architecture cannot execute
+              # the image at all. Say that, rather than let docker fail with a
+              # bare exec-format error several minutes in.
+              RUNNER_ARCH_UNAME="$(uname -m)"
+              if [ "${RUNNER_ARCH_UNAME}" != "${OCX_ARCH}" ]; then
+                echo "::error::container legs for ${{ matrix.docker_platform }} need a ${OCX_ARCH} runner (this one is ${RUNNER_ARCH_UNAME}); set an arch-matched \`runner:\` on this platform"
+                exit 1
+              fi
+              OCX_TRIPLE="${OCX_ARCH}-unknown-linux-${{ matrix.container_libc }}"
+              OCX_CONTAINER_DIR="${RUNNER_TEMP}/ocx-${OCX_TRIPLE}"
+              OCX_CONTAINER_BIN="${OCX_CONTAINER_DIR}/ocx"
+              if [ ! -x "${OCX_CONTAINER_BIN}" ]; then
+                mkdir -p "${OCX_CONTAINER_DIR}"
+                # cargo-dist archives carry a single top-level directory, so
+                # --strip-components=1 lands the binary directly. A layout change
+                # fails the chmod instead of silently testing nothing.
+                curl -fsSL "https://github.com/ocx-sh/ocx/releases/download/v0.6.0/ocx-${OCX_TRIPLE}.tar.gz" \
+                  | tar -xz -C "${OCX_CONTAINER_DIR}" --strip-components=1
+                chmod +x "${OCX_CONTAINER_BIN}"
+              fi
+              # Pull the image here rather than letting `docker run` do it
+              # implicitly: a rate-limited or flaky pull inside the test loop is
+              # recorded as a failed testcase, indistinguishable from a mirrored
+              # artifact that genuinely does not run. Failing this step instead
+              # keeps a red testcase meaning exactly one thing. Guarded by
+              # `inspect` — that is when `docker run` would have pulled anyway,
+              # and a pull per version would spend a manifest request (the thing
+              # being rate-limited) on every one. It also precedes the setup
+              # build below, so a provisioned image's FROM resolves from cache.
+              if ! docker image inspect "${CONTAINER_IMAGE}" >/dev/null 2>&1; then
+                OCX_PULL_ATTEMPT=1
+                OCX_PULL_DELAY=2
+                until docker pull --platform "${{ matrix.docker_platform }}" "${CONTAINER_IMAGE}"; do
+                  if [ "${OCX_PULL_ATTEMPT}" -ge 5 ]; then
+                    echo "::error::could not pull ${CONTAINER_IMAGE} for ${{ matrix.docker_platform }} after ${OCX_PULL_ATTEMPT} attempts (rate limit, network, or a tag with no ${{ matrix.docker_platform }} variant — see the docker output above)"
+                    exit 1
+                  fi
+                  echo "pull of ${CONTAINER_IMAGE} failed (attempt ${OCX_PULL_ATTEMPT}); retrying in ${OCX_PULL_DELAY}s"
+                  sleep "${OCX_PULL_DELAY}"
+                  OCX_PULL_ATTEMPT=$((OCX_PULL_ATTEMPT + 1))
+                  OCX_PULL_DELAY=$((OCX_PULL_DELAY * 2))
+                done
+              fi
+            fi
+            ocx_test() {
+              if [ -n "${CONTAINER_IMAGE}" ]; then
+                # The workspace is mounted at its own path so the bundle and its
+                # `-metadata.json` sibling resolve identically inside and out.
+                # OCX_HOME points into the container's own /tmp, so the install
+                # the test runs against never touches the runner's filesystem.
+                # The gnu ocx verifies TLS against the system CA store, which a
+                # minimal base image need not carry; the musl build has webpki
+                # roots baked in and ignores the mount.
+                docker run --rm -i --platform "${{ matrix.docker_platform }}" \
+                  -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+                  -v "${OCX_CONTAINER_BIN}:/usr/local/bin/ocx:ro" \
+                  -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
+                  -e OCX_HOME=/tmp/ocx-home -e OCX_NO_UPDATE_CHECK=1 \
+                  "${CONTAINER_IMAGE}" ocx "$@"
+              else
+                ocx "$@"
+              fi
+            }
             mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
             TESTS_JSON='${{ toJson(matrix.tests) }}'
@@ -230,15 +325,15 @@ jobs:
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
                 TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command" | tr -d '\r')
-                ocx package test --platform "${TEST_PLATFORM}" --identifier "dev.ocx.sh/ocx/e2e-signing:${VERSION}" -m "${METADATA}" ${LAYERS} -- \
+                ocx_test package test --platform "${TEST_PLATFORM}" --identifier "dev.ocx.sh/ocx/e2e-signing:${VERSION}" -m "${METADATA}" ${LAYERS} -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
                 TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script" | tr -d '\r')
-                ocx package test --platform "${TEST_PLATFORM}" --identifier "dev.ocx.sh/ocx/e2e-signing:${VERSION}" -m "${METADATA}" ${LAYERS} \
+                ocx_test package test --platform "${TEST_PLATFORM}" --identifier "dev.ocx.sh/ocx/e2e-signing:${VERSION}" -m "${METADATA}" ${LAYERS} \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
                 TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline" | tr -d '\r')
-                printf '%s' "${TEST_INLINE}" | ocx package test --platform "${TEST_PLATFORM}" --identifier "dev.ocx.sh/ocx/e2e-signing:${VERSION}" -m "${METADATA}" ${LAYERS} \
+                printf '%s' "${TEST_INLINE}" | ocx_test package test --platform "${TEST_PLATFORM}" --identifier "dev.ocx.sh/ocx/e2e-signing:${VERSION}" -m "${METADATA}" ${LAYERS} \
                   --script - || RC=$?
               fi
               END=$(date +%s)
