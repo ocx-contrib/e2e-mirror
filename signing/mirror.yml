@@ -28,9 +28,13 @@ python:
   lock:
     universal: true
 
+# One entry per platform, no libc split. mirror-pypi splits linux by libc
+# and pairs each key with a container leg that declares its own libc; a bare
+# native leg carries no `+libc.` suffix and so resolves neither bundle. The
+# canary needs several platform manifests under one index -- that is what the
+# signing sweep is about -- not a libc matrix.
 wheels:
-  "linux/amd64+libc.glibc": ~
-  "linux/amd64+libc.musl": ~
+  linux/amd64: ~
   darwin/arm64: ~
   windows/amd64: ~
 
