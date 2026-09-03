@@ -43,11 +43,15 @@ gh workflow run "Deploy Dev" --repo ocx-sh/ocx-mirror --ref <branch>
 
 Everything published here goes to `dev.ocx.sh`. Nothing is published to GHCR.
 
-## Known blocker
+## Which `ocx` actually runs
 
-The keyless push leg needs an `ocx` carrying `--fulcio-url` / `--rekor-url` on
-`package push --sign`. Those landed after 0.6.0, and the renderer bakes
-`version: "0.6.0"` into every `setup-ocx` step from a constant in
-`ocx-mirror`, not from this repository's `ocx.toml`. Until an `ocx` release
-carrying them exists and that constant moves, the push leg exits 64 with
-`unexpected argument '--fulcio-url'`.
+`setup-ocx`'s `version:` input — baked as `0.6.0` by the renderer — installs
+only the **bootstrap** `ocx` that performs project activation. It then
+activates `ocx.toml`, so the `ocx` and `ocx-mirror` the push step invokes both
+come from the pins above. The generated push step calls `ocx-mirror` directly
+rather than through `ocx exec` precisely to keep it that way.
+
+That is what makes an unreleased `ocx` usable here: keyless signing needs
+`--fulcio-url` / `--rekor-url` on `ocx package push --sign`, which landed after
+0.6.0, and pinning a `dev.ocx.sh` cli supplies them with no release cut.
+
